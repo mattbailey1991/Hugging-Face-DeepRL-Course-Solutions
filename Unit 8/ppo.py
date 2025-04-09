@@ -1,4 +1,4 @@
-"""Loosely follows tutorial from https://www.youtube.com/embed/MEt6rrxH8W4"""
+"""Follows tutorial from https://iclr-blog-track.github.io/2022/03/25/ppo-implementation-details/"""
 
 # Python Utils
 import argparse
@@ -13,7 +13,7 @@ import numpy as np
 # Gym
 import gym
 
-# PyTorch / Weights & Biases 
+# PyTorch 
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -22,23 +22,14 @@ from torch.utils.tensorboard import SummaryWriter
 
 
 def main():
+
+##############################################
+# SETUP
+##############################################
+
     args = parse_args()
     run_name = f"{args.env_id}_{args.exp_name}_{args.seed}_{int(time.time())}"
     
-    # Set up Weights & Bias tracking 
-    if args.track:
-        import wandb
-
-        wandb.init(
-            project = args.wandb_project_name,
-            entity = args.wandb_team_name,
-            sync_tensorboard = True,
-            config=vars(args),
-            name = run_name,
-            monitor_gym = True,
-            save_code = True 
-        )
-
     # Set up Tensorboard tracking
     writer = SummaryWriter(f"runs/{run_name}")
     writer.add_text("hyperparameters", "|param|value|\n|-|-|\n%s" % ("\n".join([f"|{key}|{value}|" for key, value in vars(args).items()])))
@@ -64,38 +55,76 @@ def main():
     # Create PyTorch optimiser
     optimiser = optim.Adam(agent.parameters, lr = args.learning_rate, weight_decay = args.weight_decay)
 
+    # Initialise variables
+    steps_trained = 0
+    n = args.num_envs
+    m = args.rollout_steps
+    s_size = envs.single_observation_space.shape
+    a_size = envs.single_action_space.n
+    batch_size = n * m
+    update_count = args.total_timesteps / batch_size
+    next_state = torch.Tensor(envs.reset()).to(device)
+    next_done = torch.zeros(n).to(device)
+
+##############################################
+# PPO LOOP
+##############################################
+
+    # Loop through batches collecting 
+    for update in range(update_count):
+        
+        # Create storage buffer
+        buffer = StorageBuffer(n, m, s_size, a_size, device)#
+
+        # Play the game for m steps, and save data to buffer 
+        for step in range(m):
+            state = next_state
+            action, log_prob, _ = agent.act(state)
+            value = agent.v(state)
+            next_state, reward, _, _, info, done = envs.step(action) 
+            
+            buffer.states[m] = next_state
+            buffer.actions[m] = action
+            buffer.log_probs[m] = log_prob
+            buffer.rewards[m] = reward
+            buffer.dones[m] = done
+            buffer.values[m] = value
+
+##############################################
+# COMMAND LINE ARGUMENTS
+##############################################
 
 def parse_args():
     """Parses the command line arguments"""
     parser = argparse.ArgumentParser()
     # Environment variables
-    parser.add_argument('--exp-name', type=str, default=os.path.basename(__file__).rstrip(".py"), help="The experiment name")
-    parser.add_argument('--env-id', type=str, default="LunarLander-v2", help="The gym environment to be trained")
+    parser.add_argument('--exp-name', type = str, default = os.path.basename(__file__).rstrip(".py"), help = "The experiment name")
+    parser.add_argument('--env-id', type = str, default = "LunarLander-v2", help = "The gym environment to be trained")
     
     # Training variables
-    parser.add_argument('--learning-rate', type=float, default=2.5e-4, help="Learning rate of the optimiser")
-    parser.add_argument('--seed', type=int, default=1, help="Sets random, numpy, torch seed")
-    parser.add_argument('--total-timesteps', type=int, default=25000, help="Total timesteps of the experiment")
+    parser.add_argument('--lr', type = float, default = 2.5e-4, help = "Learning rate of the optimiser")
+    parser.add_argument('--seed', type = int, default = 1, help = "Sets random, numpy, torch seed")
+    parser.add_argument('--total-timesteps', type = int, default = 25000, help = "Total timesteps of the experiment")
     
     # Device variables
-    parser.add_argument('--torch-deterministic', type=lambda x: bool(strtobool(x)), default=True, nargs='?', const=True, help="If toggled, torch.backends.cudnn.deterministic=False")
+    parser.add_argument('--torch-deterministic', type = lambda x: bool(strtobool(x)), default = True, nargs = '?', const = True, help = "If toggled, torch.backends.cudnn.deterministic=False")
     parser.add_argument('--cuda', type=lambda x: bool(strtobool(x)), default=True, nargs='?', const=True, help="If toggled, cuda will not be enabled")
     
-    # Weights and biases variables
-    parser.add_argument('--track', type=lambda x: bool(strtobool(x)), default=True, nargs='?', const=True, help="If toggled, the project will be tracked with weights and biases")
-    parser.add_argument('--wandb-project-name', type=str, default="Test Project", help="Weights and biases project name")
-    parser.add_argument('--wandb-team-name', type=str, default="mattbailey1991-study", help="Weights and biases team name")
-
     # Video recording variable
     parser.add_argument('--record-video', type=lambda x: bool(strtobool(x)), default=False, nargs='?', const=True, help="Saves videos of the agent performance to the videos folder")
 
     # PPO variables
     parser.add_argument('--num-envs', type=int, default=4, help="The number of vectorised environments")
+    parser.add_argument('--rollout-steps', type=int, default=100, help="The number of steps per rollout per environment")
     parser.add_argument('--weight-decay', type=int, default=1e-4, help="The weight decay / L2 regularisation for the adam optimiser")
 
     args = parser.parse_args()
     return args
 
+
+##############################################
+# ACTOR AND CRITIC NETWORKS
+##############################################
 
 class Agent(nn.Module):
     """Actor and critic networks"""
@@ -130,26 +159,45 @@ class Agent(nn.Module):
         the log_prob of action,
         the entropy of the action probability distribution"""
         probs = self.actor(self.hidden(x))
-        m = Categorical(probs)
+        cat = Categorical(probs)
         if action == None:
-            action = m.sample()
-        return action, m.log_prob(action), m.entropy()
+            action = cat.sample()
+        return action, cat.log_prob(action), cat.entropy()
 
 
-class StorageBuffer():
-    def hello():
+    def learn(data, states, done):
         raise NotImplementedError
 
+##############################################
+# STORAGE BUFFER
+##############################################
+
+class StorageBuffer():
+    def __init__(self, n, m, s_size, a_size, device):
+        self.states = torch.zeros((m, n) + s_size).to(device)
+        self.actions = torch.zeros((m, n) + a_size).to(device)
+        self.log_probs = torch.zeros((m, n)).to(device)
+        self.rewards = torch.zeros((m, n)).to(device)
+        self.dones = torch.zeros((m, n)).to(device)
+        self.values = torch.zeros((m, n)).to(device)
+ 
+
+##############################################
+# HELPER FUNCTIONS
+##############################################
 
 def make_env(env_id, seed, env_num, record_video, run_name):
     """Creates a single gym environment"""
     env = gym.make(env_id)
     env = gym.wrappers.RecordEpisodeStatistics(env)
+    
+    # Record video for first environment, if requested
     if record_video:
-        # First environment only
         if env_num == 0:
             trigger = lambda t: t % 100 == 0
             env = gym.wrappers.RecordVideo(env, f"./videos/{run_name}", episode_trigger = trigger)
+    
+    # Set seed
     env.seed = seed
     env.action_space.seed = seed
     env.observation_space.seed = seed
