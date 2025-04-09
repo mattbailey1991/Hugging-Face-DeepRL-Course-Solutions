@@ -46,23 +46,23 @@ def main():
     else:
         device = torch.device("cpu")
 
-    # Create vectorised environments
+    # Create N (num_envs) vectorised environments
     envs = gym.vector.SyncVectorEnv([lambda: make_env(args.env_id, args.seed + i, i, args.record_video, run_name) for i in range(args.num_envs)])
 
     # Create agent
     agent = Agent(envs).to(device)
     
     # Create PyTorch optimiser
-    optimiser = optim.Adam(agent.parameters, lr = args.learning_rate, weight_decay = args.weight_decay)
+    optimiser = optim.Adam(agent.parameters(), lr = args.lr, weight_decay = args.weight_decay)
 
     # Initialise variables
-    steps_trained = 0
+    cum_steps_trained = 0
     n = args.num_envs
     m = args.rollout_steps
     s_size = envs.single_observation_space.shape
     a_size = envs.single_action_space.n
     batch_size = n * m
-    update_count = args.total_timesteps / batch_size
+    update_count = int(args.total_timesteps / batch_size)
     next_state = torch.Tensor(envs.reset()).to(device)
     next_done = torch.zeros(n).to(device)
 
@@ -70,9 +70,9 @@ def main():
 # PPO LOOP
 ##############################################
 
-    # Loop through batches collecting 
+    # Loop through batches collecting data and then training agent 
     for update in range(update_count):
-        
+
         # Create storage buffer
         buffer = StorageBuffer(n, m, s_size, a_size, device)#
 
@@ -89,6 +89,12 @@ def main():
             buffer.rewards[m] = reward
             buffer.dones[m] = done
             buffer.values[m] = value
+
+            cum_steps_trained += n
+        
+        agent.learn(buffer)
+
+        print(buffer.states)
 
 ##############################################
 # COMMAND LINE ARGUMENTS
@@ -165,7 +171,7 @@ class Agent(nn.Module):
         return action, cat.log_prob(action), cat.entropy()
 
 
-    def learn(data, states, done):
+    def learn(buffer):
         raise NotImplementedError
 
 ##############################################
