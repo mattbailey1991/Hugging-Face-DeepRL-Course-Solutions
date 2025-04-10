@@ -5,6 +5,7 @@ import argparse
 import os
 from distutils.util import strtobool
 import time
+from math import exp
 
 # Maths
 import random
@@ -12,7 +13,6 @@ import numpy as np
 
 # Gym
 import gym
-
 
 # PyTorch 
 import torch
@@ -23,15 +23,15 @@ from torch.utils.tensorboard import SummaryWriter
 
 
 def main():
-
 ##############################################
 # SETUP
 ##############################################
 
+    # Parse command line arguments
     args = parse_args()
     run_name = f"{args.env_id}_{args.exp_name}_{args.seed}_{int(time.time())}"
     
-    # Set up Tensorboard tracking
+    # Set up Tensorboard tracking (view using: !tensorboard --logdir runs)
     writer = SummaryWriter(f"runs/{run_name}")
     writer.add_text("hyperparameters", "|param|value|\n|-|-|\n%s" % ("\n".join([f"|{key}|{value}|" for key, value in vars(args).items()])))
 
@@ -63,9 +63,16 @@ def main():
     s_size = envs.single_observation_space.shape
     a_size = envs.single_action_space.n
     batch_size = n * m
-    update_count = int(args.total_timesteps / batch_size)
+    minibatch_count = args.minibatches
+    epochs = args.epochs
+    gamma = args.gamma
+    clip_param = args.clip_param
+    ent_coef = args.ent_coef
+    vl_coef = args.vl_coef
+    norm_advantages = args.norm_advantages
+    update_count = int(args.total_timesteps // batch_size)
     next_state = torch.Tensor(envs.reset()).to(device)
-    next_done = torch.zeros(n).to(device)
+    done = torch.zeros(n).to(device)
 
 ##############################################
 # PPO LOOP
@@ -75,12 +82,16 @@ def main():
     for update in range(update_count):
 
         # Create storage buffer
-        buffer = StorageBuffer(n, m, s_size, a_size, device)#
+        buffer = StorageBuffer(n, m, s_size, device)
 
         # Play the game for m steps, and save data to buffer 
         for i in range(m):
-            print(i)
+            # Save state and done to buffer
             state = next_state
+            buffer.states[i] = state
+            buffer.dones[i] = done
+            
+            # Get action and take an environment step
             with torch.no_grad():
                 action, log_prob, _ = agent.act(state)
                 value = agent.v(state)
@@ -91,17 +102,39 @@ def main():
             reward = torch.Tensor(reward).to(device)
             done = torch.Tensor(done).to(device)
             
-            # Save data to buffer
-            buffer.states[i] = next_state
+            # Save action, action_log prob, reward and estimated value to buffer
             buffer.actions[i] = action
             buffer.log_probs[i] = log_prob
             buffer.rewards[i] = reward
-            buffer.dones[i] = done
             buffer.values[i] = value.flatten()
 
             cum_steps_trained += n
+            
+            # Log returns and episode lengths into tensorboard
+            for item in info:
+                if "episode" in item.keys():
+                    print(f"cumulative_steps_trained={cum_steps_trained}, episodic_return={item['episode']['r']}")
+                    writer.add_scalar("charts/episodic_return", item["episode"]["r"], cum_steps_trained)
+                    writer.add_scalar("charts/episodic_length", item["episode"]["l"], cum_steps_trained)
+                    break
         
-        agent.learn(buffer)
+        # Calculate advantages and returns using:
+        # a(t) = r(t) + gamma*v(t+1) - v(t), using v() from critic network
+        # ret(t) = sum(r(t) + gamma * r(t+1) + .... gamma^k * r(t+k))
+        with torch.no_grad():
+            for i in reversed(range(m)):
+                if i == m - 1:
+                    next_val = agent.v(next_state).flatten()
+                    terminated = 1 - done
+                    buffer.advantages[i] = buffer.rewards[i] + gamma * terminated * next_val - buffer.values[i]
+                    buffer.returns[i] = buffer.rewards[i] + gamma * terminated * next_val
+                else:
+                    terminated = 1 - buffer.dones[i + 1]
+                    buffer.advantages[i] = buffer.rewards[i] + gamma * terminated * buffer.returns[i + 1] - buffer.values[i]
+                    buffer.returns[i] = buffer.rewards[i] + gamma * terminated * buffer.returns[i + 1]
+
+        # Train agent using sgd/backprop
+        agent.learn(optimiser, buffer, epochs, s_size, batch_size, minibatch_count, clip_param, ent_coef, vl_coef, norm_advantages)
 
 ##############################################
 # COMMAND LINE ARGUMENTS
@@ -113,11 +146,7 @@ def parse_args():
     # Environment variables
     parser.add_argument('--exp-name', type = str, default = os.path.basename(__file__).rstrip(".py"), help = "The experiment name")
     parser.add_argument('--env-id', type = str, default = "LunarLander-v2", help = "The gym environment to be trained")
-    
-    # Training variables
-    parser.add_argument('--lr', type = float, default = 2.5e-4, help = "Learning rate of the optimiser")
     parser.add_argument('--seed', type = int, default = 1, help = "Sets random, numpy, torch seed")
-    parser.add_argument('--total-timesteps', type = int, default = 25000, help = "Total timesteps of the experiment")
     
     # Device variables
     parser.add_argument('--torch-deterministic', type = lambda x: bool(strtobool(x)), default = True, nargs = '?', const = True, help = "If toggled, torch.backends.cudnn.deterministic=False")
@@ -126,11 +155,20 @@ def parse_args():
     # Video recording variable
     parser.add_argument('--record-video', type=lambda x: bool(strtobool(x)), default=False, nargs='?', const=True, help="Saves videos of the agent performance to the videos folder")
 
-    # PPO variables
+    # Training variables
+    parser.add_argument('--total-timesteps', type = int, default = 25000, help = "Total timesteps of the experiment")
     parser.add_argument('--num-envs', type=int, default=4, help="The number of vectorised environments")
-    parser.add_argument('--rollout-steps', type=int, default=100, help="The number of steps per rollout per environment")
+    parser.add_argument('--rollout-steps', type=int, default=500, help="The number of steps per rollout per environment")
+    parser.add_argument('--epochs', type=int, default=4, help="The number of epochs to train in each update")
+    parser.add_argument('--minibatches', type=int, default=4, help="The number of minibatches")
+    parser.add_argument('--lr', type = float, default = 2.5e-4, help = "Learning rate of the optimiser")
+    parser.add_argument('--gamma', type=float, default=0.995, help="The discount rate for returns")
+    parser.add_argument('--clip-param', type=float, default=0.2, help="The clip coefficient for the clipped surrogate objective function")
     parser.add_argument('--weight-decay', type=int, default=1e-4, help="The weight decay / L2 regularisation for the adam optimiser")
-
+    parser.add_argument("--ent-coef", type=float, default=0.01, help="coefficient of the entropy loss")
+    parser.add_argument("--vl-coef", type=float, default=0.5, help="coefficient of the value loss")
+    parser.add_argument('--norm-advantages', type=lambda x: bool(strtobool(x)), default=True, nargs='?', const=True, help="Normalises minibatch advantages")
+    
     args = parser.parse_args()
     return args
 
@@ -178,22 +216,69 @@ class Agent(nn.Module):
         return action, cat.log_prob(action), cat.entropy()
 
 
-    def learn(self, buffer):
-        raise NotImplementedError
+    def learn(self, buffer, epochs, s_size, batch_size, minibatch_count, clip_param, ent_coef, vl_coef, norm_advantages):        
+        # Flatten vectorised environments
+        states = buffer.states.reshape((-1,) + s_size)
+        actions = buffer.actions.reshape(-1)
+        log_probs = buffer.log_probs.reshape(-1)
+        returns = buffer.returns.reshape(-1)
+        advantages = buffer.advantages.reshape(-1)
+
+        # Train for x epochs
+        minibatch_size = batch_size // minibatch_count
+        for i in range(epochs):
+            # Shuffle data
+            batch_inds = np.arange(batch_size)
+            np.random.shuffle(batch_inds)
+
+            # Split into minibatches
+            minibatches = []
+            for i in range(0, batch_size, minibatch_size):
+                minibatches.append(batch_inds[i:i + minibatch_size])
+
+            # Train minibatches
+            for minibatch in minibatches:
+                # Calculate policy loss
+                mb_old_log_probs = log_probs[minibatch]
+                _, mb_new_log_probs, mb_entropys = self.act(states[minibatch],actions[minibatch])
+                mb_log_ratios = mb_new_log_probs - mb_old_log_probs
+                mb_ratios = mb_log_ratios.exp()
+                mb_advantages = advantages[minibatch]
+                if norm_advantages:
+                    mb_advantages = (mb_advantages - mb_advantages.mean()) / (mb_advantages.std() + 1e-8)
+                policy_loss = torch.max(-mb_advantages * mb_ratios, -mb_advantages * torch.clamp(mb_ratios, 1 - clip_param, 1 + clip_param)).mean()
+                
+                # Calculate entropy loss
+                entropy_loss = mb_entropys.mean()
+
+                # Calculate value loss
+                mb_new_values = self.v(states[minibatch])
+                value_loss = 0.5 * ((mb_new_values - returns[minibatch]) ** 2).mean()
+
+                # Total loss
+                ppo_loss = policy_loss - ent_coef * entropy_loss + vl_coef * value_loss
+
+                # Backpropagation
+                optimiser.zero_grad()
+                ppo_loss.backward()
+                optimiser.step()
+
 
 ##############################################
 # STORAGE BUFFER
 ##############################################
 
 class StorageBuffer():
-    def __init__(self, n, m, s_size, a_size, device):
+    def __init__(self, n, m, s_size, device):
         self.states = torch.zeros((m, n) + s_size).to(device)
         self.actions = torch.zeros((m, n)).to(device)
         self.log_probs = torch.zeros((m, n)).to(device)
         self.rewards = torch.zeros((m, n)).to(device)
         self.dones = torch.zeros((m, n)).to(device)
         self.values = torch.zeros((m, n)).to(device)
- 
+        self.advantages = torch.zeros((m, n)).to(device)
+        self.returns = torch.zeros((m, n)).to(device)
+
 
 ##############################################
 # HELPER FUNCTIONS
