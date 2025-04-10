@@ -13,6 +13,7 @@ import numpy as np
 # Gym
 import gym
 
+
 # PyTorch 
 import torch
 import torch.nn as nn
@@ -77,24 +78,30 @@ def main():
         buffer = StorageBuffer(n, m, s_size, a_size, device)#
 
         # Play the game for m steps, and save data to buffer 
-        for step in range(m):
+        for i in range(m):
+            print(i)
             state = next_state
-            action, log_prob, _ = agent.act(state)
-            value = agent.v(state)
-            next_state, reward, _, _, info, done = envs.step(action) 
+            with torch.no_grad():
+                action, log_prob, _ = agent.act(state)
+                value = agent.v(state)
+            next_state, reward, done, info = envs.step(action.cpu().numpy())
+
+            # Convert np.ndarray returned by env.step() to Tensor
+            next_state = torch.Tensor(next_state).to(device)
+            reward = torch.Tensor(reward).to(device)
+            done = torch.Tensor(done).to(device)
             
-            buffer.states[m] = next_state
-            buffer.actions[m] = action
-            buffer.log_probs[m] = log_prob
-            buffer.rewards[m] = reward
-            buffer.dones[m] = done
-            buffer.values[m] = value
+            # Save data to buffer
+            buffer.states[i] = next_state
+            buffer.actions[i] = action
+            buffer.log_probs[i] = log_prob
+            buffer.rewards[i] = reward
+            buffer.dones[i] = done
+            buffer.values[i] = value.flatten()
 
             cum_steps_trained += n
         
         agent.learn(buffer)
-
-        print(buffer.states)
 
 ##############################################
 # COMMAND LINE ARGUMENTS
@@ -147,7 +154,7 @@ class Agent(nn.Module):
         # Actor network
         self.actor = nn.Sequential(
             layer_init(nn.Linear(64, envs.single_action_space.n), std=0.01),
-            nn.Softmax()
+            nn.Softmax(dim=-1)
         )
 
         self.critic = nn.Sequential(
@@ -171,7 +178,7 @@ class Agent(nn.Module):
         return action, cat.log_prob(action), cat.entropy()
 
 
-    def learn(buffer):
+    def learn(self, buffer):
         raise NotImplementedError
 
 ##############################################
@@ -181,7 +188,7 @@ class Agent(nn.Module):
 class StorageBuffer():
     def __init__(self, n, m, s_size, a_size, device):
         self.states = torch.zeros((m, n) + s_size).to(device)
-        self.actions = torch.zeros((m, n) + a_size).to(device)
+        self.actions = torch.zeros((m, n)).to(device)
         self.log_probs = torch.zeros((m, n)).to(device)
         self.rewards = torch.zeros((m, n)).to(device)
         self.dones = torch.zeros((m, n)).to(device)
