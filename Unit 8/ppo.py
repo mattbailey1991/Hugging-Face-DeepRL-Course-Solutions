@@ -71,7 +71,7 @@ def main():
     norm_advantages = args.norm_advantages
     gae_lambda = args.gae_lambda
     update_count = int(args.total_timesteps // batch_size)
-    next_state = torch.Tensor(envs.reset()).to(device)
+    next_state = torch.Tensor(envs.reset()).float().to(device)
     done = torch.zeros(n).to(device)
 
 ##############################################
@@ -98,9 +98,9 @@ def main():
             next_state, reward, done, info = envs.step(action.cpu().numpy())
 
             # Convert np.ndarray returned by env.step() to Tensor
-            next_state = torch.Tensor(next_state).to(device)
-            reward = torch.Tensor(reward).to(device)
-            done = torch.Tensor(done).to(device)
+            next_state = torch.Tensor(next_state).float().to(device)
+            reward = torch.Tensor(reward).float().to(device)
+            done = torch.Tensor(done).int().to(device)
             
             # Save action, action_log prob, reward and estimated value to buffer
             buffer.actions[i] = action
@@ -258,7 +258,8 @@ class Agent(nn.Module):
 
                 # Calculate value loss
                 mb_new_values = self.v(states[minibatch])
-                value_loss = 0.5 * ((mb_new_values - returns[minibatch]) ** 2).mean()
+                clipped_values = buffer.values[minibatch] + torch.clamp(mb_new_values - buffer.values[minibatch], -clip_param, clip_param)
+                value_loss = 0.5 * torch.max((mb_new_values - returns[minibatch]) ** 2,(clipped_values - returns[minibatch]) ** 2).mean()
 
                 # Total loss
                 ppo_loss = policy_loss - ent_coef * entropy_loss + vl_coef * value_loss
