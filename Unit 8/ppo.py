@@ -228,7 +228,7 @@ class Agent(nn.Module):
         log_probs = buffer.log_probs.reshape(-1)
         returns = buffer.returns.reshape(-1)
         advantages = buffer.advantages.reshape(-1)
-        values = buffer.advantages.reshape(-1)
+        values = buffer.values.reshape(-1)
 
         # Train for x epochs
         minibatch_size = batch_size // minibatch_count
