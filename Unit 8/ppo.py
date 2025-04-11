@@ -138,7 +138,7 @@ def main():
                 buffer.returns[i] = buffer.advantages[i] + buffer.values[i]
 
         # Train agent using sgd/backprop
-        agent.learn(optimiser, buffer, epochs, s_size, batch_size, minibatch_count, clip_param, ent_coef, vl_coef, norm_advantages)
+        agent.learn(optimiser, buffer, epochs, s_size, batch_size, minibatch_count, clip_param, ent_coef, vl_coef, norm_advantages, writer, cum_steps_trained)
 
 ##############################################
 # COMMAND LINE ARGUMENTS
@@ -206,6 +206,7 @@ class Agent(nn.Module):
 
     def v(self, x):
         """Returns the estimated value of state x according to the critic network"""
+        x = x.float()
         return self.critic(self.hidden(x))
     
 
@@ -214,6 +215,7 @@ class Agent(nn.Module):
         action selected at random from the probability distribution produced by the actor network,
         the log_prob of action,
         the entropy of the action probability distribution"""
+        x = x.float()
         probs = self.actor(self.hidden(x))
         cat = Categorical(probs)
         if action == None:
@@ -221,7 +223,7 @@ class Agent(nn.Module):
         return action, cat.log_prob(action), cat.entropy()
 
 
-    def learn(self, optimiser, buffer, epochs, s_size, batch_size, minibatch_count, clip_param, ent_coef, vl_coef, norm_advantages):        
+    def learn(self, optimiser, buffer, epochs, s_size, batch_size, minibatch_count, clip_param, ent_coef, vl_coef, norm_advantages, writer, cum_steps_trained):        
         # Flatten vectorised environments
         states = buffer.states.reshape((-1,) + s_size)
         actions = buffer.actions.reshape(-1)
@@ -258,7 +260,7 @@ class Agent(nn.Module):
                 entropy_loss = mb_entropys.mean()
 
                 # Calculate value loss
-                mb_new_values = self.v(states[minibatch])
+                mb_new_values = self.v(states[minibatch]).flatten()
                 clipped_values = values[minibatch] + torch.clamp(mb_new_values - values[minibatch], -clip_param, clip_param)
                 value_loss = 0.5 * torch.max((mb_new_values - returns[minibatch]) ** 2,(clipped_values - returns[minibatch]) ** 2).mean()
 
@@ -269,6 +271,10 @@ class Agent(nn.Module):
                 optimiser.zero_grad()
                 ppo_loss.backward()
                 optimiser.step()
+
+        writer.add_scalar("loss/policy", policy_loss.item(), cum_steps_trained)
+        writer.add_scalar("loss/value", value_loss.item(), cum_steps_trained)
+        writer.add_scalar("loss/entropy", entropy_loss.item(), cum_steps_trained)
 
 
 ##############################################
