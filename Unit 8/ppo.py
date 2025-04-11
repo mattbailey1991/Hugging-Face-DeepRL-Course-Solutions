@@ -36,8 +36,8 @@ def main():
     writer.add_text("hyperparameters", "|param|value|\n|-|-|\n%s" % ("\n".join([f"|{key}|{value}|" for key, value in vars(args).items()])))
 
     # Set random seed
-    random.seed = args.seed
-    np.random.seed = args.seed
+    random.seed(args.seed)
+    np.random.seed(args.seed)
     torch.manual_seed(args.seed)
 
     # Set device variables
@@ -61,7 +61,6 @@ def main():
     n = args.num_envs
     m = args.rollout_steps
     s_size = envs.single_observation_space.shape
-    a_size = envs.single_action_space.n
     batch_size = n * m
     minibatch_count = args.minibatches
     epochs = args.epochs
@@ -122,16 +121,20 @@ def main():
         # a(t) = r(t) + gamma*v(t+1) - v(t), using v() from critic network
         # ret(t) = sum(r(t) + gamma * r(t+1) + .... gamma^k * r(t+k))
         with torch.no_grad():
+            next_value = agent.v(next_state).flatten()
+            gae = 0
             for i in reversed(range(m)):
                 if i == m - 1:
-                    next_val = agent.v(next_state).flatten()
-                    terminated = 1 - done
-                    buffer.advantages[i] = buffer.rewards[i] + gamma * terminated * next_val - buffer.values[i]
-                    buffer.returns[i] = buffer.rewards[i] + gamma * terminated * next_val
+                    nextnonterminal = 1.0 - done
+                    next_values = next_value
                 else:
-                    terminated = 1 - buffer.dones[i + 1]
-                    buffer.advantages[i] = buffer.rewards[i] + gamma * terminated * buffer.returns[i + 1] - buffer.values[i]
-                    buffer.returns[i] = buffer.rewards[i] + gamma * terminated * buffer.returns[i + 1]
+                    nextnonterminal = 1.0 - buffer.dones[i + 1]
+                    next_values = buffer.values[i + 1]
+
+                delta = buffer.rewards[i] + gamma * next_values * nextnonterminal - buffer.values[i]
+                gae = delta + gamma * args.gae_lambda * nextnonterminal * gae
+                buffer.advantages[i] = gae
+                buffer.returns[i] = buffer.advantages[i] + buffer.values[i]
 
         # Train agent using sgd/backprop
         agent.learn(optimiser, buffer, epochs, s_size, batch_size, minibatch_count, clip_param, ent_coef, vl_coef, norm_advantages)
@@ -164,10 +167,11 @@ def parse_args():
     parser.add_argument('--lr', type = float, default = 2.5e-4, help = "Learning rate of the optimiser")
     parser.add_argument('--gamma', type=float, default=0.995, help="The discount rate for returns")
     parser.add_argument('--clip-param', type=float, default=0.2, help="The clip coefficient for the clipped surrogate objective function")
-    parser.add_argument('--weight-decay', type=int, default=1e-4, help="The weight decay / L2 regularisation for the adam optimiser")
+    parser.add_argument('--weight-decay', type=float, default=1e-4, help="The weight decay / L2 regularisation for the adam optimiser")
     parser.add_argument("--ent-coef", type=float, default=0.01, help="coefficient of the entropy loss")
     parser.add_argument("--vl-coef", type=float, default=0.5, help="coefficient of the value loss")
     parser.add_argument('--norm-advantages', type=lambda x: bool(strtobool(x)), default=True, nargs='?', const=True, help="Normalises minibatch advantages")
+    parser.add_argument('--gae-lambda', type=float, default=0.95, help="Lambda for Generalized Advantage Estimation")
     
     args = parser.parse_args()
     return args
@@ -216,7 +220,7 @@ class Agent(nn.Module):
         return action, cat.log_prob(action), cat.entropy()
 
 
-    def learn(self, buffer, epochs, s_size, batch_size, minibatch_count, clip_param, ent_coef, vl_coef, norm_advantages):        
+    def learn(self, optimiser, buffer, epochs, s_size, batch_size, minibatch_count, clip_param, ent_coef, vl_coef, norm_advantages):        
         # Flatten vectorised environments
         states = buffer.states.reshape((-1,) + s_size)
         actions = buffer.actions.reshape(-1)
@@ -240,7 +244,7 @@ class Agent(nn.Module):
             for minibatch in minibatches:
                 # Calculate policy loss
                 mb_old_log_probs = log_probs[minibatch]
-                _, mb_new_log_probs, mb_entropys = self.act(states[minibatch],actions[minibatch])
+                _, mb_new_log_probs, mb_entropys = self.act(states[minibatch],actions.long()[minibatch])
                 mb_log_ratios = mb_new_log_probs - mb_old_log_probs
                 mb_ratios = mb_log_ratios.exp()
                 mb_advantages = advantages[minibatch]
