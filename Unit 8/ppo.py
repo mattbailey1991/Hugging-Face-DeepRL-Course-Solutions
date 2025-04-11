@@ -100,7 +100,7 @@ def main():
             # Convert np.ndarray returned by env.step() to Tensor
             next_state = torch.Tensor(next_state).float().to(device)
             reward = torch.Tensor(reward).float().to(device)
-            done = torch.Tensor(done).int().to(device)
+            done = torch.Tensor(done).float().to(device)
             
             # Save action, action_log prob, reward and estimated value to buffer
             buffer.actions[i] = action
@@ -246,7 +246,7 @@ class Agent(nn.Module):
             for minibatch in minibatches:
                 # Calculate policy loss
                 mb_old_log_probs = log_probs[minibatch]
-                _, mb_new_log_probs, mb_entropys = self.act(states[minibatch],actions.long()[minibatch])
+                _, mb_new_log_probs, mb_entropys = self.act(states[minibatch],actions[minibatch])
                 mb_log_ratios = mb_new_log_probs - mb_old_log_probs
                 mb_ratios = mb_log_ratios.exp()
                 mb_advantages = advantages[minibatch]
@@ -278,7 +278,7 @@ class Agent(nn.Module):
 class StorageBuffer():
     def __init__(self, n, m, s_size, device):
         self.states = torch.zeros((m, n) + s_size).to(device)
-        self.actions = torch.zeros((m, n)).to(device)
+        self.actions = torch.zeros((m, n), dtype=torch.long).to(device)
         self.log_probs = torch.zeros((m, n)).to(device)
         self.rewards = torch.zeros((m, n)).to(device)
         self.dones = torch.zeros((m, n)).to(device)
