@@ -69,6 +69,7 @@ def main():
     ent_coef = args.ent_coef
     vl_coef = args.vl_coef
     norm_advantages = args.norm_advantages
+    gae_lambda = args.gae_lambda
     update_count = int(args.total_timesteps // batch_size)
     next_state = torch.Tensor(envs.reset()).to(device)
     done = torch.zeros(n).to(device)
@@ -132,7 +133,7 @@ def main():
                     next_values = buffer.values[i + 1]
 
                 delta = buffer.rewards[i] + gamma * next_values * nextnonterminal - buffer.values[i]
-                gae = delta + gamma * args.gae_lambda * nextnonterminal * gae
+                gae = delta + gamma * gae_lambda * nextnonterminal * gae
                 buffer.advantages[i] = gae
                 buffer.returns[i] = buffer.advantages[i] + buffer.values[i]
 
