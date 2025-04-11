@@ -228,6 +228,7 @@ class Agent(nn.Module):
         log_probs = buffer.log_probs.reshape(-1)
         returns = buffer.returns.reshape(-1)
         advantages = buffer.advantages.reshape(-1)
+        values = buffer.advantages.reshape(-1)
 
         # Train for x epochs
         minibatch_size = batch_size // minibatch_count
@@ -258,7 +259,7 @@ class Agent(nn.Module):
 
                 # Calculate value loss
                 mb_new_values = self.v(states[minibatch])
-                clipped_values = buffer.values[minibatch] + torch.clamp(mb_new_values - buffer.values[minibatch], -clip_param, clip_param)
+                clipped_values = values[minibatch] + torch.clamp(mb_new_values - values[minibatch], -clip_param, clip_param)
                 value_loss = 0.5 * torch.max((mb_new_values - returns[minibatch]) ** 2,(clipped_values - returns[minibatch]) ** 2).mean()
 
                 # Total loss
